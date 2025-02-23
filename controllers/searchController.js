@@ -1,87 +1,81 @@
+// searchController.js
+const User = require('../models/user');
+const Company = require('../models/company');
+
 const search = async (req, res) => {
     try {
-        const query = req.query;
+        const query = req.query.query;
         if (!query) return res.status(400).json({ message: 'Query is required' });
 
+        // Search Users
         const users = await User.aggregate([
+            { $match: { $text: { $search: query } } },
             {
-              $match: { $text: { $search: query } }, // Text search on name and email
+                $lookup: {
+                    from: 'companies',
+                    localField: 'companyId',
+                    foreignField: '_id',
+                    as: 'companyDetails'
+                }
+            },
+            { $unwind: '$companyDetails' },
+            {
+                $graphLookup: {
+                    from: 'companies',
+                    startWith: '$companyDetails.parentCompanyId',
+                    connectFromField: 'parentCompanyId',
+                    connectToField: '_id',
+                    as: 'parentHierarchy',
+                    depthField: 'level'
+                }
+            }
+        ]).limit(5);
+
+        // Search Companies
+        const companies = await Company.aggregate([
+            { $match: { $text: { $search: query } } },
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: '_id',
+                    foreignField: 'companyId',
+                    as: 'associatedUsers'
+                }
             },
             {
-              $lookup: {
-                from: 'companies', // Join with the Company collection
-                localField: 'companyId',
-                foreignField: '_id',
-                as: 'company',
-              },
+                $graphLookup: {
+                    from: 'companies',
+                    startWith: '$parentCompanyId',
+                    connectFromField: 'parentCompanyId',
+                    connectToField: '_id',
+                    as: 'parentHierarchy',
+                    depthField: 'level'
+                }
             },
-            {
-              $unwind: '$company', // Unwind the joined company array
-            },
-            {
-              $project: {
-                name: 1,
-                email: 1,
-                role: 1,
+            { $limit: 5 }
+        ]);
+
+        res.json({
+            users: users.map(user => ({
+                name: user.name,
+                email: user.email,
+                role: user.role,
                 company: {
-                  name: '$company.name',
-                  parentCompany: '$company.parentCompanyId',
-                },
-              },
-            },
-            {
-              $limit: 5, // Limit to 5 users
-            },
-          ]);
-          const companies = await Company.aggregate([
-            {
-              $match: { $text: { $search: query } }, // Text search on name
-            },
-            {
-              $lookup: {
-                from: 'users', // Join with the User collection
-                localField: 'users',
-                foreignField: '_id',
-                as: 'users',
-              },
-            },
-            {
-              $project: {
-                name: 1,
-                hierarchyLevel: 1,
-                users: {
-                  $slice: ['$users', 5], // Limit to 5 users
-                },
-              },
-            },
-            {
-              $limit: 5, // Limit to 5 companies
-            },
-          ]);
-         
-         const formattedUsers = users.map((user) => ({
+                    name: user.companyDetails.name,
+                    hierarchy: user.parentHierarchy.map(h => h.name).reverse()
+                }
+            })),
+            companies: companies.map(company => ({
+                name: company.name,
+                hierarchyLevel: company.hierarchyLevel,
+                hierarchy: company.parentHierarchy.map(h => h.name).reverse(),
+                associatedUsers: company.associatedUsers.slice(0, 5).map(user => ({
                     name: user.name,
                     email: user.email,
-                    role: user.role,
-                    company: {
-                      name: user.companyId.name,
-                      parentCompany: user.companyId.parentCompanyId
-                        ? user.companyId.parentCompanyId.name
-                        : null,
-                    },
-                  }));
-              
-         const formattedCompanies = companies.map((company) => ({
-                    name: company.name,
-                    hierarchy: company.hierarchyLevel,
-                    users: company.users.slice(0, 5).map((user) => ({
-                      name: user.name,
-                      email: user.email,
-                      role: user.role,
-                    })),
-                  }));
-      res.status(200).json( { users: formattedUsers, companies: formattedCompanies });
-
+                    role: user.role
+                }))
+            }))
+        });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
